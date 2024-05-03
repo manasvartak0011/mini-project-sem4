@@ -1,3 +1,4 @@
+import numpy as np
 from flask import Flask, request, jsonify, send_file, render_template
 import re
 from io import BytesIO
@@ -36,26 +37,24 @@ def predict():
     try:
         # Check if the request contains a file (for bulk prediction) or text input
         if "file" in request.files:
-            # Bulk prediction from CSV file
-            file = request.files["file"]
-            data = pd.read_csv(file)
+            try:
+                predictor = pickle.load(open("Models/model_xgb.pkl", "rb"))
+                scaler = pickle.load(open("Models/scaler.pkl", "rb"))
+                cv = pickle.load(open("Models/countVectorizer.pkl", "rb"))
 
-            predictions, graph = bulk_prediction(predictor, scaler, cv, data)
+                if "file" in request.files:
+                    file = request.files["file"]
+                    data = pd.read_csv(file)
 
-            response = send_file(
-                predictions,
-                mimetype="text/csv",
-                as_attachment=True,
-                download_name="Predictions.csv",
-            )
+                    predictions_df = bulk_prediction(predictor, scaler, cv, data)
 
-            response.headers["X-Graph-Exists"] = "true"
+                    # Convert DataFrame to CSV string
+                    predictions_csv = predictions_df.to_csv(index=False)
 
-            response.headers["X-Graph-Data"] = base64.b64encode(
-                graph.getbuffer()
-            ).decode("ascii")
+                    return predictions_csv
 
-            return response
+            except Exception as e:
+                return jsonify({"error": str(e)})
 
         elif "text" in request.json:
             # Single string prediction
@@ -76,75 +75,46 @@ def single_prediction(predictor, scaler, cv, text_input):
     stemmer = PorterStemmer()
     review = re.sub("[^a-zA-Z]", " ", text_input)
     review = review.lower().split()
-    review = [stemmer.stem(word) for word in review if not word in STOPWORDS]
+    review = [stemmer.stem(word) for word in review if word not in STOPWORDS]  # corrected from 'if not word in STOPWORDS'
     review = " ".join(review)
     corpus.append(review)
     X_prediction = cv.transform(corpus).toarray()
     X_prediction_scl = scaler.transform(X_prediction)
     y_predictions = predictor.predict_proba(X_prediction_scl)
-    
     return y_predictions
 
 
 def bulk_prediction(predictor, scaler, cv, data):
     corpus = []
     stemmer = PorterStemmer()
-    for i in range(0, data.shape[0]):
+    for i in range(data.shape[0]):
         review = re.sub("[^a-zA-Z]", " ", data.iloc[i]["Sentence"])
         review = review.lower().split()
-        review = [stemmer.stem(word) for word in review if not word in STOPWORDS]
+        review = [stemmer.stem(word) for word in review if word not in STOPWORDS]
         review = " ".join(review)
         corpus.append(review)
 
     X_prediction = cv.transform(corpus).toarray()
     X_prediction_scl = scaler.transform(X_prediction)
     y_predictions = predictor.predict_proba(X_prediction_scl)
-    print()
-    y_predictions = list(map(sentiment_mapping, y_predictions))
 
-    data["Predicted sentiment"] = y_predictions
-    predictions_csv = BytesIO()
+    predicted_sentiments = sentiment_mapping(y_predictions[:, 1])
 
-    data.to_csv(predictions_csv, index=False)
-    predictions_csv.seek(0)
+    data["Predicted Sentiment"] = predicted_sentiments
 
-    graph = get_distribution_graph(data)
+    predictions_df = pd.DataFrame({
+        "Sentence": data["Sentence"],
+        "Predicted Sentiment": data["Predicted Sentiment"]
+    })
 
-    return predictions_csv, graph
-
-
-def get_distribution_graph(data):
-    fig = plt.figure(figsize=(5, 5))
-    colors = ("green", "red")
-    wp = {"linewidth": 1, "edgecolor": "black"}
-    tags = data["Predicted sentiment"].value_counts()
-    explode = (0.01, 0.01)
-
-    tags.plot(
-        kind="pie",
-        autopct="%1.1f%%",
-        shadow=True,
-        colors=colors,
-        startangle=90,
-        wedgeprops=wp,
-        explode=explode,
-        title="Sentiment Distribution",
-        xlabel="",
-        ylabel="",
-    )
-
-    graph = BytesIO()
-    plt.savefig(graph, format="png")
-    plt.close()
-
-    return graph
+    return predictions_df
 
 
 def sentiment_mapping(x):
-    if x == 1:
-        return "Positive"
+    if isinstance(x, (list, tuple, pd.Series, np.ndarray)):
+        return ["Positive" if val == 1 else "Negative" for val in x]
     else:
-        return "Negative"
+        return "Positive" if x == 1 else "Negative"
 
 
 if __name__ == "__main__":
